@@ -25,10 +25,12 @@ import (
 
 const (
 	historiesCacheSize  = 1000
+	splitStatCacheSize  = 1000
 	eventsCacheSize     = 1000
 	maxScheduleRetries  = 10
 	maxScheduleInterval = time.Minute
 	minScheduleInterval = time.Millisecond * 10
+	splitStatCacheTTL   = 10 * time.Minute
 )
 
 var (
@@ -51,6 +53,7 @@ type coordinator struct {
 	schedulers map[string]*scheduleController
 
 	histories *lruCache
+	splitStat *lruCache
 	events    *fifoCache
 }
 
@@ -67,6 +70,7 @@ func newCoordinator(cluster *clusterInfo, opt *scheduleOption) *coordinator {
 		schedulers: make(map[string]*scheduleController),
 		histories:  newLRUCache(historiesCacheSize),
 		events:     newFifoCache(eventsCacheSize),
+		splitStat:  newLRUCache(splitStatCacheSize),
 	}
 }
 
@@ -97,6 +101,7 @@ func (c *coordinator) dispatch(region *regionInfo) *pdpb.RegionHeartbeatResponse
 func (c *coordinator) run() {
 	c.addScheduler(newBalanceLeaderScheduler(c.opt))
 	c.addScheduler(newBalanceRegionScheduler(c.opt))
+	c.addScheduler(newBalanceHotRangeScheduler(c.opt, c.splitStat, c.cluster))
 }
 
 func (c *coordinator) stop() {
@@ -123,7 +128,10 @@ func (c *coordinator) addScheduler(scheduler Scheduler) error {
 		return errSchedulerExisted
 	}
 
-	s := newScheduleController(c, scheduler)
+	s := newScheduleController(c, scheduler, minScheduleInterval)
+	if scheduler.GetName() == "balance-hot-range" {
+		s = newScheduleController(c, scheduler, 10*time.Second)
+	}
 	if err := s.Prepare(c.cluster); err != nil {
 		return errors.Trace(err)
 	}
@@ -279,13 +287,13 @@ type scheduleController struct {
 	cancel   context.CancelFunc
 }
 
-func newScheduleController(c *coordinator, s Scheduler) *scheduleController {
+func newScheduleController(c *coordinator, s Scheduler, interval time.Duration) *scheduleController {
 	ctx, cancel := context.WithCancel(c.ctx)
 	return &scheduleController{
 		Scheduler: s,
 		opt:       c.opt,
 		limiter:   c.limiter,
-		interval:  minScheduleInterval,
+		interval:  interval,
 		ctx:       ctx,
 		cancel:    cancel,
 	}

@@ -22,9 +22,16 @@ import (
 )
 
 type cacheItem struct {
-	key    uint64
+	key    interface{}
 	value  interface{}
 	expire time.Time
+}
+
+type splitRegionStat struct {
+	endKey []byte
+	count  int
+	expire time.Time
+	id     uint64
 }
 
 type idCache struct {
@@ -144,7 +151,7 @@ type lruCache struct {
 	maxCount int
 
 	ll    *list.List
-	cache map[uint64]*list.Element
+	cache map[interface{}]*list.Element
 }
 
 // newLRUCache returns a new lru cache.
@@ -152,11 +159,11 @@ func newLRUCache(maxCount int) *lruCache {
 	return &lruCache{
 		maxCount: maxCount,
 		ll:       list.New(),
-		cache:    make(map[uint64]*list.Element),
+		cache:    make(map[interface{}]*list.Element),
 	}
 }
 
-func (c *lruCache) add(key uint64, value interface{}) {
+func (c *lruCache) add(key interface{}, value interface{}) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -174,7 +181,7 @@ func (c *lruCache) add(key uint64, value interface{}) {
 	}
 }
 
-func (c *lruCache) get(key uint64) (interface{}, bool) {
+func (c *lruCache) get(key interface{}) (interface{}, bool) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -186,7 +193,7 @@ func (c *lruCache) get(key uint64) (interface{}, bool) {
 	return nil, false
 }
 
-func (c *lruCache) remove(key uint64) {
+func (c *lruCache) remove(key interface{}) {
 	c.Lock()
 	defer c.Unlock()
 
@@ -283,7 +290,7 @@ func (c *fifoCache) fromElems(key uint64) []*cacheItem {
 	elems := make([]*cacheItem, 0, c.ll.Len())
 	for ele := c.ll.Back(); ele != nil; ele = ele.Prev() {
 		kv := ele.Value.(*cacheItem)
-		if kv.key > key {
+		if kv.key.(uint64) > key {
 			elems = append(elems, ele.Value.(*cacheItem))
 		}
 	}

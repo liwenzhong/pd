@@ -15,6 +15,7 @@ package server
 
 import (
 	"math"
+	"sort"
 	"time"
 
 	"github.com/montanaflynn/stats"
@@ -366,4 +367,152 @@ func (r *replicaChecker) checkBestReplacement(region *regionInfo) Operator {
 		return nil
 	}
 	return newTransferPeer(region, oldPeer, newPeer)
+}
+
+type regionRecord struct {
+	id    uint64
+	score int
+}
+type storeHotRecord struct {
+	id    uint64
+	score int
+	hit   int
+	rids  []regionRecord
+}
+
+type sortHotRecord []storeHotRecord
+
+func (a sortHotRecord) Len() int           { return len(a) }
+func (a sortHotRecord) Less(i, j int) bool { return a[i].score < a[j].score }
+func (a sortHotRecord) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+
+type balanceHotRange struct {
+	opt       *scheduleOption
+	rep       *Replication
+	limit     uint64
+	selector  Selector
+	splitStat *lruCache
+	record    sortHotRecord
+	cluster   *clusterInfo
+}
+
+func newBalanceHotRangeScheduler(opt *scheduleOption, splitStat *lruCache, cluster *clusterInfo) *balanceHotRange {
+	var filters []Filter
+	filters = append(filters, newStateFilter(opt))
+	filters = append(filters, newHealthFilter(opt))
+	filters = append(filters, newSnapshotCountFilter(opt))
+
+	return &balanceHotRange{
+		opt:       opt,
+		rep:       opt.GetReplication(),
+		limit:     1,
+		selector:  newBalanceSelector(regionKind, filters),
+		splitStat: splitStat,
+		cluster:   cluster,
+		record:    make(sortHotRecord, 0, 1000),
+	}
+}
+
+func (s *balanceHotRange) GetName() string {
+	return "balance-hot-range"
+}
+
+func (s *balanceHotRange) GetResourceKind() ResourceKind {
+	return regionKind
+}
+
+func (s *balanceHotRange) GetResourceLimit() uint64 {
+	return minUint64(s.limit, s.opt.GetRegionScheduleLimit())
+}
+
+func (s *balanceHotRange) Prepare(cluster *clusterInfo) error { return nil }
+
+func (s *balanceHotRange) Cleanup(cluster *clusterInfo) {}
+
+func (s *balanceHotRange) Schedule(cluster *clusterInfo) Operator {
+	// Select a peer from the store with most regions.
+	region, peer := s.cals()
+	if region == nil || peer == nil {
+		return nil
+	}
+	return newTransferLeader(region, peer)
+}
+
+func (s *balanceHotRange) selectWorstPeer() {
+}
+
+func (s *balanceHotRange) cals() (*regionInfo, *metapb.Peer) {
+	els := s.splitStat.elems()
+	now := time.Now()
+	shs := make(map[uint64]storeHotRecord)
+	for _, e := range els {
+		v := e.value.(splitRegionStat)
+		if v.expire.Before(now) {
+			s.splitStat.remove(e.key)
+			continue
+		}
+		sid := s.cluster.getRegion(v.id).Leader.GetStoreId()
+		sh, ok := shs[sid]
+		if !ok {
+			shs[sid] = storeHotRecord{id: sid, rids: make([]regionRecord, 0, 10)}
+		}
+		sh = shs[sid]
+		sh.score = sh.score + v.count
+		sh.hit++
+		sh.rids = append(sh.rids, regionRecord{v.id, v.count})
+		shs[sid] = sh
+	}
+	for _, sh := range shs {
+		s.record = append(s.record, sh)
+	}
+
+	sort.Sort(s.record)
+	log.Infof("Debug record : %+v", s.record)
+	var (
+		lid  uint64
+		lhit int
+	)
+	for _, r := range s.record {
+		if r.hit < 2 {
+			continue
+		}
+		least := math.MinInt32
+		c := 0
+		for _, rid := range r.rids {
+			if least < rid.score {
+				least = rid.score
+				lid = rid.id
+				c++
+				if c == 2 {
+					break
+				}
+			}
+		}
+		if lid != 0 {
+			lhit = r.hit
+			break
+		}
+	}
+	if lid == 0 {
+		log.Warnf("RangeBalance: not select source region")
+		return nil, nil
+	}
+	region := s.cluster.getRegion(lid)
+
+	var targetPeer *metapb.Peer
+	least := math.MaxInt32
+	for _, peer := range region.GetFollowers() {
+		if sh, ok := shs[peer.GetId()]; ok {
+			if least < sh.score && lhit-sh.hit > 1 {
+				targetPeer = peer
+				least = sh.score
+			}
+		}
+	}
+	if targetPeer == nil {
+		log.Warnf("RangeBalance: not select target")
+		return nil, nil
+	}
+	return region, targetPeer
+
 }

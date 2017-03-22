@@ -15,6 +15,7 @@ package server
 
 import (
 	"bytes"
+	"time"
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/juju/errors"
@@ -100,8 +101,31 @@ func (c *RaftCluster) handleReportSplit(request *pdpb.ReportSplitRequest) (*pdpb
 	// Wrap report split as an Operator, and add it into history cache.
 	op := newSplitOperator(originRegion, left, right)
 	c.coordinator.histories.add(originRegion.GetId(), op)
-
 	c.coordinator.postEvent(op, evtEnd)
+
+	// Update SplitStat
+	stat := splitRegionStat{
+		endKey: originRegion.GetEndKey(),
+		count:  1,
+		expire: time.Now().Add(splitStatCacheTTL),
+		id:     right.GetId(),
+	}
+	key := string(originRegion.GetEndKey())
+	s, ok := c.coordinator.splitStat.get(key)
+	if !ok {
+		c.coordinator.splitStat.add(key, stat)
+	} else {
+		oldStat := s.(splitRegionStat)
+		if time.Now().Before(stat.expire) {
+			oldStat.count++
+			oldStat.expire = time.Now().Add(splitStatCacheTTL)
+			oldStat.id = right.GetId()
+			stat = oldStat
+		} else {
+			c.coordinator.splitStat.remove(key)
+		}
+	}
+	c.coordinator.splitStat.add(key, stat)
 
 	return &pdpb.ReportSplitResponse{}, nil
 }

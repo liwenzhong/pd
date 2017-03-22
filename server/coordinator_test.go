@@ -297,7 +297,7 @@ func (s *testScheduleControllerSuite) TestController(c *C) {
 	cfg, opt := newTestScheduleConfig()
 	co := newCoordinator(cluster, opt)
 	lb := newBalanceLeaderScheduler(opt)
-	sc := newScheduleController(co, lb)
+	sc := newScheduleController(co, lb, minScheduleInterval)
 
 	for i := minScheduleInterval; sc.GetInterval() != maxScheduleInterval; i *= 2 {
 		c.Assert(sc.GetInterval(), Equals, i)
